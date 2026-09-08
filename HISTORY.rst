@@ -4,6 +4,8 @@ Changelog
 Unreleased
 ~~~~~~~~~~
 
+* Performance: mutant generation renders each function once and splices the mutated text in, instead of rebuilding and rendering the whole function tree per mutant
+
 * Performance: the clean test run is skipped right after a full stats collection or when nothing is left to test, and otherwise limited to the tests of the mutants about to be tested. The forced-fail check probes a few tests known to reach mutated functions instead of running the whole suite
 
 * Performance: faster stats collection on big test suites. Recording which functions a test reaches no longer resolves file paths on every call to a mutated function
