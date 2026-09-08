@@ -401,7 +401,7 @@ class _RecordingTestRunner:
         self._record()
         return 0
 
-    def run_forced_fail(self):
+    def run_forced_fail(self, *, tests=()):
         self._record()
         return 1
 
