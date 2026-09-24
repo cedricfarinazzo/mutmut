@@ -18,7 +18,9 @@ Unreleased
 
 * Performance: under ``process_isolation = "forkserver"``, a mutant's tests run fastest first too, so killed mutants are found sooner
 
-* Performance: slightly faster mutant generation
+* Performance: faster mutant generation, and every ``mutmut`` command starts faster: importing mutmut takes about half as long
+
+* Performance: importing mutated code is faster, which helps test suites that start Python subprocesses
 
 * Fix ``max_stack_depth`` crashing stats collection on frames without a source file, such as a ``@dataclass`` generated ``__init__``
 
