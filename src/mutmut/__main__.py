@@ -19,6 +19,7 @@ if platform.system() == "Windows":
 import ast
 import fnmatch
 import hashlib
+import importlib.metadata
 import json
 import shutil
 import subprocess
@@ -456,6 +457,45 @@ def compute_watched_file_hashes() -> dict[str, str]:
     return _hash_files(paths)
 
 
+# Files mutmut itself keeps next to the mutated code; they do not affect which tests exist.
+_MUTMUT_BOOKKEEPING_SUFFIXES = (".meta", ".spans", ".log", ".pyc")
+_MUTMUT_BOOKKEEPING_FILES = frozenset({"mutmut-stats.json", "mutmut-cicd-stats.json"})
+# pytest searches the parent directories of mutants/ for its config.
+_PYTEST_CONFIG_FILES = ("pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml")
+
+
+def compute_test_suite_fingerprint() -> str:
+    """Fingerprint everything that decides which tests pytest collects in ``mutants/``.
+
+    That is every file pytest sees there (the mutated sources, the copied tests and data
+    files, the project files), pytest's config files, the Python version and the installed
+    distributions. mutmut's own bookkeeping, bytecode and hidden files or directories
+    (``.pytest_cache``, ``.hypothesis``, ...) are left out, since they change between runs
+    without changing the tests.
+    """
+    digest = hashlib.sha256()
+    digest.update(sys.version.encode())
+    distributions = sorted(f"{dist.metadata['Name']}=={dist.version}" for dist in importlib.metadata.distributions())
+    digest.update("\n".join(distributions).encode())
+
+    root = Path("mutants")
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d != "__pycache__")
+        for filename in sorted(filenames):
+            if (
+                filename.startswith(".")
+                or filename.endswith(_MUTMUT_BOOKKEEPING_SUFFIXES)
+                or filename in _MUTMUT_BOOKKEEPING_FILES
+            ):
+                continue
+            path = Path(dirpath) / filename
+            digest.update(str(path.relative_to(root)).encode() + b"\0")
+            digest.update(path.read_bytes() if path.is_file() else b"")
+    for name, file_hash in sorted(_hash_files(_PYTEST_CONFIG_FILES).items()):
+        digest.update(f"{name}={file_hash}".encode())
+    return digest.hexdigest()[:16]
+
+
 def _run_git(args: list[str]) -> str | None:
     """Run a git command at the project root. Returns stdout, or None on any failure
     (git not installed, not a repo, unknown ref, ...). Git is a soft dependency: this
@@ -665,6 +705,7 @@ def collect_or_load_stats(
     invalidate_stale_callers: bool = True,
 ) -> None:
     did_load = load_stats()
+    test_suite_fingerprint = compute_test_suite_fingerprint()
 
     force_full = False
     if did_load and apply_config_invalidation:
@@ -675,11 +716,17 @@ def collect_or_load_stats(
         _refresh_change_detection_baseline()
         # Run full stats
         run_stats_collection(runner)
+        _record_listed_test_suite(test_suite_fingerprint)
     else:
         _cleanup_stale_stats()
         if config().track_dependencies and invalidate_stale_callers:
             _invalidate_stale_dependency_edges()
         save_stats()
+
+        if did_load and state().test_suite_fingerprint == test_suite_fingerprint:
+            # Nothing pytest could collect differently has changed since the tests were last
+            # listed, so neither obsolete nor new tests are possible.
+            return
 
         # Run incremental stats
         with CatchOutput(spinner_title="Listing all tests") as output_catcher:
@@ -698,6 +745,17 @@ def collect_or_load_stats(
         if new_tests:
             print(f"Found {len(new_tests)} new tests, rerunning stats collection")
             run_stats_collection(runner, tests=new_tests)
+
+        _record_listed_test_suite(test_suite_fingerprint)
+
+
+def _record_listed_test_suite(test_suite_fingerprint: str) -> None:
+    """Remember that the stats now cover exactly the tests of this test suite fingerprint.
+
+    Only called once the tests have been listed (or all run), so an interrupted or failed
+    listing never lets the next run skip it."""
+    state().test_suite_fingerprint = test_suite_fingerprint
+    save_stats()
 
 
 def save_cicd_stats(source_file_mutation_data_by_path: dict[str, SourceFileMutationData]) -> None:

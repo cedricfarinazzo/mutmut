@@ -19,6 +19,9 @@ class MutmutState:
     watched_file_hashes: dict[str, str] = field(default_factory=dict)
     old_git_commit: str | None = None
     git_commit: str | None = None
+    # Fingerprint of everything that decides which tests pytest collects, as of the last time
+    # the tests were listed. While it matches, the listing can be skipped.
+    test_suite_fingerprint: str | None = None
     # Migrated from module-level globals in mutmut/__init__.py.
     stats_time: float | None = None
     duration_by_test: defaultdict[str, float] = field(default_factory=lambda: defaultdict(float))
