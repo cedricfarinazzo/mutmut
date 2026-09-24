@@ -7,11 +7,11 @@ from typing import Any
 from typing import ParamSpec
 from typing import TypeVar
 
-from mutmut.__main__ import MutmutProgrammaticFailException
-from mutmut.__main__ import record_trampoline_hit
 from mutmut.configuration import config
 from mutmut.core import MutmutCallStack
+from mutmut.core import MutmutProgrammaticFailException
 from mutmut.state import state
+from mutmut.stats import record_trampoline_hit
 from mutmut.utils.format_utils import mangled_name_from_mutant_name
 
 TReturn = TypeVar("TReturn")

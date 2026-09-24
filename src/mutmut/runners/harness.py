@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 from typing import Any
 
+from mutmut.configuration import ForkServerWarmup
 from mutmut.configuration import config
 from mutmut.state import state
 from mutmut.stats import save_stats
@@ -49,6 +50,16 @@ class TestRunner(ABC):
     def list_all_tests(self) -> ListAllTestsResult:
         raise NotImplementedError()
 
+    def warm_up(self) -> None:
+        """Pre-import expensive modules so forked children inherit them.
+
+        Called by ForkServerRunner inside the fork server after the test runner is
+        created. Importing pytest (and optionally running collection) here means
+        the grandchildren fork with everything already in memory. The default is
+        a no-op for runners that do not benefit from it.
+        """
+        return
+
 
 def collected_test_names() -> set[str]:
     return set(state().duration_by_test.keys())
@@ -60,18 +71,18 @@ class ListAllTestsResult:
         self.ids = ids
 
     def clear_out_obsolete_test_names(self) -> None:
-        count_before = sum(len(x) for x in state().tests_by_mangled_function_name)
+        known = collected_test_names().union(*state().tests_by_mangled_function_name.values())
+        obsolete = known - self.ids
+        if not obsolete:
+            return
         state().tests_by_mangled_function_name = defaultdict(
             set,
-            **{
-                k: {test_name for test_name in test_names if test_name in self.ids}
-                for k, test_names in state().tests_by_mangled_function_name.items()
-            },
+            **{k: test_names - obsolete for k, test_names in state().tests_by_mangled_function_name.items()},
         )
-        count_after = sum(len(x) for x in state().tests_by_mangled_function_name)
-        if count_before != count_after:
-            print(f"Removed {count_before - count_after} obsolete test names")
-            save_stats()
+        for test_name in obsolete:
+            state().duration_by_test.pop(test_name, None)
+        print(f"Removed {len(obsolete)} obsolete test names")
+        save_stats()
 
     def new_tests(self) -> set[str]:
         return self.ids - collected_test_names()
@@ -81,6 +92,34 @@ class PytestRunner(TestRunner):
     def __init__(self) -> None:
         self._pytest_add_cli_args: list[str] = config().pytest_add_cli_args
         self._pytest_add_cli_args_test_selection: list[str] = config().pytest_add_cli_args_test_selection
+
+    def warm_up(self) -> None:
+        """Pre-load test infrastructure per the ``forkserver_warmup`` config.
+
+        - COLLECT (default): run ``pytest --collect-only`` to import conftest,
+          plugins, and test modules (biggest speedup for most projects).
+        - IMPORT: import the modules listed in ``preload_modules_file``.
+        - NONE: import nothing beyond what running a test already needs.
+        """
+        warmup = config().forkserver_warmup
+
+        if warmup == ForkServerWarmup.COLLECT:
+            with change_cwd("mutants"):
+                self.execute_pytest(["--collect-only", "-qqq"] + self._pytest_add_cli_args_test_selection)
+        elif warmup == ForkServerWarmup.IMPORT:
+            preload_file = config().preload_modules_file
+            if preload_file:
+                import importlib
+
+                with open(preload_file) as f:
+                    for line in f:
+                        module_name = line.strip()
+                        if module_name and not module_name.startswith("#"):
+                            try:
+                                importlib.import_module(module_name)
+                            except ImportError:
+                                pass  # Best effort.
+        # ForkServerWarmup.NONE -> no-op.
 
     # noinspection PyMethodMayBeStatic
     def execute_pytest(self, params: list[str], **kwargs: Any) -> int:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import inspect
 import json
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from json import JSONDecodeError
+from pathlib import Path
 
 from mutmut.configuration import config
 from mutmut.mutation.data import SourceFileMutationData
@@ -15,7 +18,6 @@ status_by_exit_code = defaultdict(
     {
         1: "killed",
         3: "killed",  # internal error in pytest means a kill
-        -24: "killed",
         0: "survived",
         5: "no tests",
         2: "check was interrupted by user",
@@ -144,3 +146,68 @@ def save_stats() -> None:
             f,
             indent=4,
         )
+
+
+FRAME_OTHER = 0
+FRAME_MUTATED_SOURCE = 1
+FRAME_TEST_FRAMEWORK = 2
+
+# co_filename -> FRAME_* classification. Filenames come from code objects, so there are only
+# as many distinct keys as loaded modules; classifying one costs a path resolution.
+_frame_classification_cache: dict[str, int] = {}
+
+
+def classify_frame_filename(filename: str) -> int:
+    """Classify a stack frame by its code object's filename, for ``max_stack_depth``.
+
+    Relative filenames are not cached because their meaning depends on the working directory,
+    which tests may change.
+    """
+    cached = _frame_classification_cache.get(filename)
+    if cached is not None:
+        return cached
+
+    if "pytest" in filename or "hammett" in filename or "unittest" in filename:
+        result = FRAME_TEST_FRAMEWORK
+    elif filename.startswith("<"):
+        # <string>, <frozen ...>: not a file
+        result = FRAME_OTHER
+    else:
+        try:
+            file_path = Path(filename).resolve()
+        except (OSError, ValueError):
+            result = FRAME_OTHER
+        else:
+            parents = file_path.parents
+            result = (
+                FRAME_MUTATED_SOURCE
+                if any(path in parents for path in config().resolved_mutated_source_paths)
+                else FRAME_OTHER
+            )
+
+    if os.path.isabs(filename):
+        _frame_classification_cache[filename] = result
+    return result
+
+
+def record_trampoline_hit(name: str, caller: str | None = None) -> None:
+    assert not name.startswith("src."), "Failed trampoline hit. Module name starts with `src.`, which is invalid"
+
+    if config().max_stack_depth != -1:
+        f = inspect.currentframe()
+        c = config().max_stack_depth
+        while c and f:
+            classification = classify_frame_filename(f.f_code.co_filename)
+            f = f.f_back
+            if classification == FRAME_TEST_FRAMEWORK:
+                break
+            if classification == FRAME_MUTATED_SOURCE:
+                # only include stack frames of user-code; exclude mutmut and 3rd library stack frames
+                c -= 1
+
+        if not c:
+            return
+
+    state()._stats.add(name)
+    if caller is not None and config().track_dependencies:
+        state().function_dependencies[name].add(caller)

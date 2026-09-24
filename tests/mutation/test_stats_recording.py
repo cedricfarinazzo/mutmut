@@ -8,14 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 
-import mutmut.__main__
 import mutmut.mutation.trampoline as trampoline_module
-from mutmut.__main__ import FRAME_MUTATED_SOURCE
-from mutmut.__main__ import FRAME_OTHER
-from mutmut.__main__ import FRAME_TEST_FRAMEWORK
-from mutmut.__main__ import _frame_classification_cache
-from mutmut.__main__ import classify_frame_filename
-from mutmut.__main__ import record_trampoline_hit
+import mutmut.stats
 from mutmut.configuration import Config
 from mutmut.mutation.trampoline import _get_dependency_depth
 from mutmut.mutation.trampoline import _needs_recording
@@ -24,6 +18,12 @@ from mutmut.mutation.trampoline import set_mutant_under_test
 from mutmut.mutation.trampoline import wrap_in_trampoline
 from mutmut.state import reset_state
 from mutmut.state import state
+from mutmut.stats import FRAME_MUTATED_SOURCE
+from mutmut.stats import FRAME_OTHER
+from mutmut.stats import FRAME_TEST_FRAMEWORK
+from mutmut.stats import _frame_classification_cache
+from mutmut.stats import classify_frame_filename
+from mutmut.stats import record_trampoline_hit
 
 
 def _config(monkeypatch, project_dir: Path, *, max_stack_depth: int = -1, track_dependencies: bool = True) -> Mock:
@@ -32,7 +32,7 @@ def _config(monkeypatch, project_dir: Path, *, max_stack_depth: int = -1, track_
     cfg.source_paths = [Path("src")]
     cfg.resolved_mutated_source_paths = [project_dir / "mutants" / "src"]
     cfg.track_dependencies = track_dependencies
-    monkeypatch.setattr(mutmut.__main__, "config", lambda: cfg)
+    monkeypatch.setattr(mutmut.stats, "config", lambda: cfg)
     monkeypatch.setattr(trampoline_module, "config", lambda: cfg)
     return cfg
 

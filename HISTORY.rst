@@ -8,15 +8,36 @@ Unreleased
 
 * Fix ``max_stack_depth`` crashing stats collection on frames without a source file, such as a ``@dataclass`` generated ``__init__``
 
-* Fix ``# pragma: no mutate block`` being silently ignored when placed on an ``else``, ``except``, ``except*`` or ``finally`` header, and on the ``try`` line of a ``try``/``except*``
+3.8.0
+~~~~~~~~~~
 
-* Fix mutants being reported as survived when a test uses ``patch.dict(os.environ, ..., clear=True)`` (`#511`)
+* Fix obsolete test names never being removed from ``mutants/mutmut-stats.json`` (`#564`)
 
-* Fix `mutate_only_covered_lines` mutating code that coverage.py excludes from measurement (`# pragma: no cover`, `exclude_lines`, `exclude_also`). Such lines are reported as covered when they run, so they used to produce mutants that could only ever survive
+* Fix ``# pragma: no mutate block`` being silently ignored when placed on an ``else``, ``except``, ``except*`` or ``finally`` header, and on the ``try`` line of a ``try``/``except*`` (`#559`)
 
-* Fix mutations that delete ignored code. Dropping a `case` from a `match`, or an argument from a call, is a mutation of the enclosing node, so it used to be made even when the removed lines were themselves ignored
+* Fix ``# pragma: no mutate`` being silently ignored on ``match`` and ``case`` headers (`#554`)
 
-* Support python3.15
+* Fix mutants being reported as survived when a test uses ``patch.dict(os.environ, ..., clear=True)`` (`#511`, `#552`)
+
+* Fix `mutate_only_covered_lines` mutating code that coverage.py excludes from measurement (`# pragma: no cover`, `exclude_lines`, `exclude_also`) (`#547`)
+
+* Fix mutations that delete ignored code. Dropping a `case` from a `match`, or an argument from a call, is a mutation of the enclosing node, so it used to be made even when the removed lines were themselves ignored (`#547`)
+
+* Fix methods of decorated classes (for example `@dataclass`) not being mutated (`#480`, `#539`)
+
+* Fix time measurement including test setup/teardown instead of only the main test run (`#544`)
+
+* Fix mutants stopped by the CPU-time limit being reported as killed instead of timed out (`#565`)
+
+* Fix ``mutate_only_covered_lines`` breaking when the test suite imports a dependency that cannot be initialized twice in one process, which raised for numpy and libyaml, produced misleading type errors for cryptography, and segfaulted for asyncpg. Coverage is now gathered in a separate process, so the modules the coverage run imports are no longer unloaded and re-imported in the main process (`#528`, `#566`)
+
+* Mutate the condition of ternary expressions (`#196`, `#546`)
+
+* Add a ``process_isolation`` config for choosing which process mutant workers are forked from. The new ``forkserver`` strategy keeps mutmut's main process free of pytest and your ``conftest.py``, routing every fork through a dedicated fork server process, for test setups that are not fork-safe (``gevent``, ``grpc``, ``torch``). Tune what it preloads with ``forkserver_warmup`` (`#578`, `#566`)
+
+* Add a `badge` command that writes a shields.io endpoint file, for publishing the mutation score (`#549`)
+
+* Support python3.15 (`#551`)
 
 3.7.0
 ~~~~~
@@ -603,7 +624,7 @@ Thanks goes out Marcelo Da Cruz Pinto, Savo Kovačević,
 
 * Dict literals looking like `dict(a=foo)` now have mutated keys. You can also declare synonyms in setup.cfg.
 
-* Fix "from x import *"
+* Fix ``from x import *``
 
 
 0.0.6 (2017-06-13)
