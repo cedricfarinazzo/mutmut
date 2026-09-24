@@ -6,6 +6,20 @@ Unreleased
 
 * Performance: faster stats collection on big test suites. Recording which functions a test reaches no longer resolves file paths on every call to a mutated function
 
+* Performance: pytest is started and the test suite collected once, and every mutant worker is forked from inside that session and runs only its mutant's tests, instead of starting pytest from scratch for each mutant. Several times faster on suites of fast unit tests. Set ``reuse_test_session = false`` to turn it off
+
+* Performance: the trampoline in front of every mutated function is ~3x cheaper outside stats collection
+
+* Performance: the longest mutants are now run first, so the workers are kept busy until the end of the run
+
+* Performance: incremental runs skip listing the tests when nothing that decides which tests pytest collects has changed
+
+* Performance: mutmut's test runs no longer write pytest's cache (``-p no:cacheprovider``), unless your pytest args use it (``--lf``, ``--ff``, ``--sw``, ...)
+
+* Performance: under ``process_isolation = "forkserver"``, a mutant's tests run fastest first too, so killed mutants are found sooner
+
+* Performance: slightly faster mutant generation
+
 * Fix ``max_stack_depth`` crashing stats collection on frames without a source file, such as a ``@dataclass`` generated ``__init__``
 
 3.8.0
