@@ -322,16 +322,16 @@ def _mutant_server_plugin(runner: PytestRunner, loop: MutantServeLoop, server_st
 def run_collected_items(session: Any, items: list[Any], exit_exception: type[BaseException]) -> int:
     """Run already-collected pytest items like a ``pytest -x`` run, and return its exit code.
 
-    Meant for a forked worker: it resets the session's failure bookkeeping, which collection
-    errors in unrelated test files may have set, and must not leak into this mutant's verdict."""
-    session.testsfailed = 0
-    session.shouldfail = False
-    session.shouldstop = False
+    Meant for a forked worker. Only failures of these items count: the session may already
+    carry failures (and, with -x, ``session.shouldfail``, which pytest does not allow to be
+    unset) from collection errors in unrelated test files, which must not leak into this
+    mutant's verdict."""
+    failed_before = session.testsfailed
     try:
         for index, item in enumerate(items):
             next_item = items[index + 1] if index + 1 < len(items) else None
             item.config.hook.pytest_runtest_protocol(item=item, nextitem=next_item)
-            if session.testsfailed or session.shouldfail or session.shouldstop:
+            if session.testsfailed > failed_before:
                 break
     except exit_exception as e:
         return int(getattr(e, "returncode", None) or 2)
@@ -339,7 +339,7 @@ def run_collected_items(session: Any, items: list[Any], exit_exception: type[Bas
         return 2
     except Exception:
         return 3  # pytest's "internal error"
-    return 1 if session.testsfailed else 0
+    return 1 if session.testsfailed > failed_before else 0
 
 
 class HammettRunner(TestRunner):

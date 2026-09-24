@@ -100,3 +100,15 @@ def test_collection_errors_elsewhere_do_not_change_the_verdict(project):
 
     assert serve([("pkg.x_f__mutmut_2", [A + "test_passes"])], runner_class=RecordingRunner) == [0]
     assert not Path("mutants/fallback.log").exists()
+
+
+def test_collection_errors_elsewhere_do_not_stop_a_worker_after_its_first_test(project):
+    # A collection error counts as a failure: with -x it makes pytest set session.shouldfail
+    # in the session server, which recent pytest versions refuse to unset in the worker.
+    (project / "test_broken.py").write_text("this is not python\n")
+
+    assert serve(
+        [("pkg.x_f__mutmut_1", [A + "test_passes", A + "test_fails_when_mutant_active"])],
+        runner_class=RecordingRunner,
+    ) == [1]
+    assert not Path("mutants/fallback.log").exists()
