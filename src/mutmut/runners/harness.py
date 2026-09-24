@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import defaultdict
+from collections.abc import Callable
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 from typing import Any
@@ -15,6 +16,12 @@ from mutmut.utils.format_utils import strip_prefix
 
 if TYPE_CHECKING:
     from coverage import Coverage
+
+
+# Runs one mutant's tests: (mutant_name, tests) -> exit code. Called in the forked worker.
+RunMutantTests = Callable[[str, list[str]], int]
+# The fork server's work loop, given the function its workers use to run a mutant's tests.
+MutantServeLoop = Callable[[RunMutantTests], None]
 
 
 class CollectTestsFailedException(Exception):
@@ -49,6 +56,17 @@ class TestRunner(ABC):
 
     def list_all_tests(self) -> ListAllTestsResult:
         raise NotImplementedError()
+
+    def serve_mutants(self, loop: MutantServeLoop, *, reuse_session: bool) -> None:
+        """Run the fork server's work ``loop``, handing it the way to run a mutant's tests.
+
+        The default warms up (see ``warm_up``) and runs every mutant with ``run_tests``.
+        Runners that can collect the test suite once and run the collected tests directly
+        in each forked worker override this when ``reuse_session`` is set.
+        """
+        unused(reuse_session)
+        self.warm_up()
+        loop(lambda mutant_name, tests: self.run_tests(mutant_name=mutant_name, tests=tests))
 
     def warm_up(self) -> None:
         """Pre-import expensive modules so forked children inherit them.
@@ -139,6 +157,37 @@ class PytestRunner(TestRunner):
                             except ImportError:
                                 pass  # Best effort.
         # ForkServerWarmup.NONE -> no-op.
+
+    def serve_mutants(self, loop: MutantServeLoop, *, reuse_session: bool) -> None:
+        """Collect the test suite once and run ``loop`` inside that pytest session.
+
+        Starting pytest (parsing the config, registering plugins, collecting the test
+        files) costs far more than running a mutant's few tests. Rather than paying for
+        that in every forked worker, the fork server starts one session, collects it, and
+        runs its work loop from within the session. Each worker then runs its mutant's
+        tests straight from the collected items. Tests the session did not collect fall
+        back to a regular pytest run.
+        """
+        if not reuse_session:
+            super().serve_mutants(loop, reuse_session=False)
+            return
+
+        server_state = _MutantServerState()
+        plugin = _mutant_server_plugin(self, loop, server_state)
+        # A broken test file must not stop the session: the mutants whose tests live
+        # elsewhere can still use it, and the others fall back to a regular pytest run.
+        session_args = self._pytest_args_regular_run([]) + ["--continue-on-collection-errors"]
+        with change_cwd("mutants"):
+            try:
+                self.execute_pytest(session_args, plugins=[plugin])
+            except BadTestExecutionCommandsException:
+                if server_state.loop_ran:
+                    raise
+        if server_state.loop_error is not None:
+            raise server_state.loop_error
+        if not server_state.loop_ran:
+            # pytest stopped before its test loop, so there is no session to reuse
+            super().serve_mutants(loop, reuse_session=False)
 
     # noinspection PyMethodMayBeStatic
     def execute_pytest(self, params: list[str], **kwargs: Any) -> int:
@@ -233,6 +282,64 @@ class PytestRunner(TestRunner):
 
         selected_nodeids = collector.collected_nodeids - collector.deselected_nodeids
         return ListAllTestsResult(ids=selected_nodeids)
+
+
+class _MutantServerState:
+    """What the fork server loop left behind, read back once pytest returns."""
+
+    def __init__(self) -> None:
+        self.loop_ran = False
+        self.loop_error: BaseException | None = None
+
+
+def _mutant_server_plugin(runner: PytestRunner, loop: MutantServeLoop, server_state: _MutantServerState) -> object:
+    """pytest plugin that turns the test loop of a collected session into the fork server loop."""
+    import pytest
+
+    class MutantServerPlugin:
+        @pytest.hookimpl(tryfirst=True)
+        def pytest_runtestloop(self, session: pytest.Session) -> bool:
+            items_by_id = {item.nodeid: item for item in session.items}
+
+            def run_mutant_tests(mutant_name: str, tests: list[str]) -> int:
+                items = [items_by_id.get(test) for test in tests]
+                if any(item is None for item in items):
+                    # not in the collected session (deselected, or ids that changed): run pytest as usual
+                    return runner.run_tests(mutant_name=mutant_name, tests=tests)
+                return run_collected_items(session, items, pytest.exit.Exception)
+
+            server_state.loop_ran = True
+            try:
+                loop(run_mutant_tests)
+            except BaseException as e:  # pytest would turn it into an internal error
+                server_state.loop_error = e
+            # the loop ran the tests, so skip pytest's own test loop
+            return True
+
+    return MutantServerPlugin()
+
+
+def run_collected_items(session: Any, items: list[Any], exit_exception: type[BaseException]) -> int:
+    """Run already-collected pytest items like a ``pytest -x`` run, and return its exit code.
+
+    Meant for a forked worker: it resets the session's failure bookkeeping, which collection
+    errors in unrelated test files may have set, and must not leak into this mutant's verdict."""
+    session.testsfailed = 0
+    session.shouldfail = False
+    session.shouldstop = False
+    try:
+        for index, item in enumerate(items):
+            next_item = items[index + 1] if index + 1 < len(items) else None
+            item.config.hook.pytest_runtest_protocol(item=item, nextitem=next_item)
+            if session.testsfailed or session.shouldfail or session.shouldstop:
+                break
+    except exit_exception as e:
+        return int(getattr(e, "returncode", None) or 2)
+    except KeyboardInterrupt:
+        return 2
+    except Exception:
+        return 3  # pytest's "internal error"
+    return 1 if session.testsfailed else 0
 
 
 class HammettRunner(TestRunner):

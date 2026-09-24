@@ -66,6 +66,13 @@ mutant, streaming results back over a length-prefixed pipe. That extra generatio
 for test setups that are not fork-safe, where inheriting the main process would hang or
 crash the workers.
 
+With ``reuse_test_session`` (the default), workers are not forked straight from that
+process. A session server (the fork server, or under ``fork`` a server forked from the
+main process) starts pytest once and collects the suite, then runs its work loop from
+inside pytest's ``pytest_runtestloop`` hook. Each worker runs its mutant's tests from the
+collected items with ``pytest_runtest_protocol``, instead of starting pytest from scratch
+(``PytestRunner.serve_mutants``).
+
 The runner also owns the surrounding test operations (stats collection, clean tests,
 forced fail, test listing) so that, under ``forkserver``, those too can run in short-lived
 forks and leave the main process clean.

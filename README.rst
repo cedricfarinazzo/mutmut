@@ -276,6 +276,33 @@ better choice if you simply do not want your session-scoped setup living in the
 process that forks mutants.
 
 
+Reusing one pytest session for all mutants
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Starting pytest (reading its config, registering plugins, collecting the test
+files) usually takes much longer than running the few tests that cover a
+mutant. So by default, mutmut starts pytest once, collects your test suite, and
+forks every mutant worker from inside that session. Each worker only runs its
+mutant's tests. On a suite of fast unit tests this makes mutation testing
+several times faster.
+
+Workers still start from the same state as before: nothing but collection has
+run in the session they fork from, so session-scoped fixtures are set up in
+each worker, as they would be in a fresh pytest run. Tests the session did not
+collect are run with a regular pytest run. If a plugin or ``conftest.py`` does
+not cope with this, turn it off:
+
+.. code-block:: toml
+
+    # pyproject.toml
+    [tool.mutmut]
+    reuse_test_session = false
+
+With ``process_isolation = "forkserver"``, the session is only reused with
+the default ``forkserver_warmup = "collect"``, since the other warm-ups exist to
+keep collection out of the fork server.
+
+
 Tuning what the fork server preloads
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -215,6 +215,7 @@ def _load_config() -> Config:
         process_isolation=process_isolation,
         forkserver_warmup=forkserver_warmup,
         max_forkserver_restarts=s("max_forkserver_restarts", 3),
+        reuse_test_session=s("reuse_test_session", True),
         preload_modules_file=s("preload_modules_file", None),
         log_to_file=s("log_to_file", False),
         log_file_path=s("log_file_path", "mutants/mutmut-debug.log"),
@@ -253,6 +254,7 @@ class Config:
     preload_modules_file: str | None
     log_to_file: bool
     log_file_path: str
+    reuse_test_session: bool = True
 
     def config_fingerprint(self) -> dict[str, str]:
         """Hash the config fields that can change cached mutant *results*, grouped so the

@@ -38,12 +38,14 @@ from typing import Any
 from typing import NamedTuple
 from typing import TypeVar
 
+from mutmut.configuration import ForkServerWarmup
 from mutmut.configuration import ProcessIsolation
 from mutmut.configuration import config
 from mutmut.models.results import StatsResult
 from mutmut.mutation.trampoline import set_mutant_under_test
 from mutmut.runners.harness import ListAllTestsResult
 from mutmut.runners.harness import PytestRunner
+from mutmut.runners.harness import RunMutantTests
 from mutmut.runners.harness import TestRunner
 from mutmut.state import state
 from mutmut.utils.logging_utils import get_log_file_path
@@ -358,9 +360,13 @@ class ForkServerRunner(MutantRunner):
         test_runner_args: dict[str, Any],
         debug: bool = False,
         max_restarts: int | None = None,
+        reuse_session: bool = False,
     ) -> None:
         self._logger = get_logger(__name__)
         self.max_workers = max_workers
+        # Collect the test suite once in the fork server and run each mutant's tests from it,
+        # see TestRunner.serve_mutants.
+        self.reuse_session = reuse_session
         self.test_runner_class = test_runner_class
         self.test_runner_args = test_runner_args
         self.debug = debug
@@ -511,14 +517,27 @@ class ForkServerRunner(MutantRunner):
 
         test_runner: TestRunner = self.test_runner_class(**self.test_runner_args)
 
-        # Warm up with stdout/stderr suppressed so collection output does not
-        # corrupt the interactive terminal.
+        # Warm-up (or collection) runs with stdout/stderr suppressed, so its output does not
+        # corrupt the interactive terminal. With a reused session, the whole loop runs inside
+        # pytest, whose terminal reporter keeps writing to the stream it saw at startup.
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = open(os.devnull, "w")
         try:
-            test_runner.warm_up()
+            test_runner.serve_mutants(
+                lambda run_mutant_tests: self._serve(work_fd, result_fd, forkserver_logger, run_mutant_tests),
+                reuse_session=self.reuse_session,
+            )
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
+
+    def _serve(
+        self,
+        work_fd: int,
+        result_fd: int,
+        forkserver_logger: logging.Logger,
+        run_mutant_tests: RunMutantTests,
+    ) -> None:
+        """The fork server's work loop: fork a worker per mutant, stream results back."""
         forkserver_logger.info("Test runner initialized, ready for work")
 
         # Set up the SIGCHLD pipe AFTER warm_up: libraries like gevent may
@@ -579,6 +598,7 @@ class ForkServerRunner(MutantRunner):
                 # Grandchild: run this mutant's tests under a CPU limit.
                 worker_logger = get_logger(f"mutmut.forkserver.worker.{os.getpid()}")
                 worker_logger.debug(f"Starting {mutant_name} ({len(tests)} tests)")
+                setproctitle(f"mutmut: {mutant_name}")
 
                 sys.stdout = sys.stderr = open(os.devnull, "w")
 
@@ -587,7 +607,7 @@ class ForkServerRunner(MutantRunner):
 
                 set_mutant_under_test(mutant_name)
                 try:
-                    exit_code = test_runner.run_tests(mutant_name=mutant_name, tests=tests)
+                    exit_code = run_mutant_tests(mutant_name, tests)
                 except Exception:
                     exit_code = -1
 
@@ -642,7 +662,7 @@ class ForkServerRunner(MutantRunner):
             exit_code = os.waitstatus_to_exitcode(status)
             duration = time.time() - child.start_time
             forkserver_logger.debug(f"Completed {child.mutant_name}: exit={exit_code} ({duration:.3f}s)")
-            send_message(result_fd, (child.mutant_name, exit_code))
+            send_message(result_fd, (child.mutant_name, exit_code, duration))
 
     def submit(self, mutant_name: str, tests: list[str], cpu_time_limit: int, estimated_time: float) -> None:
         if not tests:
@@ -712,7 +732,7 @@ class ForkServerRunner(MutantRunner):
                 continue
 
             try:
-                mutant_name, exit_code = recv_message(self.result_pipe_read)
+                mutant_name, exit_code, duration = recv_message(self.result_pipe_read)
             except EOFError as err:
                 self._check_forkserver_alive()
                 raise ForkServerCrashError(exit_code=-1, lost_mutants=list(self._pending), crash_log=None) from err
@@ -720,7 +740,7 @@ class ForkServerRunner(MutantRunner):
             self._pending.discard(mutant_name)
             self._pending_work.pop(mutant_name, None)
 
-            return MutantResult(mutant_name=mutant_name, exit_code=exit_code, duration=0.0)
+            return MutantResult(mutant_name=mutant_name, exit_code=exit_code, duration=duration)
 
     def pending_count(self) -> int:
         # Queued no-test results are submitted work nobody has collected yet.
@@ -833,19 +853,46 @@ class ForkRunner(MutantRunner):
     that has already imported test code. For those, use ForkServerRunner instead.
     """
 
-    def __init__(self, max_workers: int, test_runner: TestRunner, debug: bool = False) -> None:
+    def __init__(
+        self,
+        max_workers: int,
+        test_runner: TestRunner,
+        debug: bool = False,
+        reuse_session: bool = False,
+        max_restarts: int | None = None,
+    ) -> None:
         self.max_workers = max_workers
         self.test_runner = test_runner
         self.debug = debug
+        self.reuse_session = reuse_session
+        self.max_restarts = max_restarts
         self._running: dict[int, RunningWorker] = {}  # pid -> RunningWorker
         self._no_tests_results: list[MutantResult] = []
+        # With reuse_session, mutants are run by a session server forked from this (already
+        # warmed-up) process: it collects the test suite once and forks every worker from
+        # inside that pytest session, instead of each worker starting pytest from scratch.
+        self._session_server: ForkServerRunner | None = None
 
     def startup(self) -> None:
         # Freeze the GC so the forked children inherit a stable heap and do not
         # thrash collecting objects the parent already owns.
         gc.freeze()
+        if self.reuse_session:
+            self._session_server = ForkServerRunner(
+                max_workers=self.max_workers,
+                test_runner_class=type(self.test_runner),
+                test_runner_args={},
+                debug=self.debug,
+                max_restarts=self.max_restarts,
+                reuse_session=True,
+            )
+            self._session_server.startup()
 
     def submit(self, mutant_name: str, tests: list[str], cpu_time_limit: int, estimated_time: float) -> None:
+        if self._session_server is not None:
+            self._session_server.submit(mutant_name, tests, cpu_time_limit, estimated_time)
+            return
+
         if not tests:
             self._no_tests_results.append(MutantResult(mutant_name=mutant_name, exit_code=33, duration=0.0))
             return
@@ -874,9 +921,14 @@ class ForkRunner(MutantRunner):
             self._running[pid] = RunningWorker(mutant_name, datetime.now(), estimated_time)
 
     def has_capacity(self) -> bool:
+        if self._session_server is not None:
+            return self._session_server.has_capacity()
         return len(self._running) < self.max_workers
 
     def wait_for_result(self, timeout: float | None = None) -> MutantResult:
+        if self._session_server is not None:
+            return self._session_server.wait_for_result(timeout)
+
         if self._no_tests_results:
             return self._no_tests_results.pop(0)
 
@@ -888,14 +940,20 @@ class ForkRunner(MutantRunner):
         return MutantResult(mutant_name=worker.mutant_name, exit_code=exit_code, duration=duration)
 
     def pending_count(self) -> int:
+        if self._session_server is not None:
+            return self._session_server.pending_count()
         # Queued no-test results count as pending: they are submitted work that
         # nobody has collected yet, even though they never occupied a worker slot.
         return len(self._running) + len(self._no_tests_results)
 
     def signal_work_complete(self) -> None:
-        """No-op for ForkRunner (there is no fork server to signal)."""
+        """Close the session server's work pipe; a no-op when forking workers directly."""
+        if self._session_server is not None:
+            self._session_server.signal_work_complete()
 
     def stop_all_workers(self) -> None:
+        if self._session_server is not None:
+            self._session_server.stop_all_workers()
         for pid in list(self._running):
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -903,6 +961,8 @@ class ForkRunner(MutantRunner):
                 pass
 
     def shutdown(self) -> None:
+        if self._session_server is not None:
+            self._session_server.shutdown()
         while self._running:
             try:
                 self.wait_for_result()
@@ -943,8 +1003,17 @@ def get_mutant_runner(max_workers: int = 1) -> MutantRunner:
             test_runner_args={},
             debug=config().debug,
             max_restarts=config().max_forkserver_restarts,
+            # Collecting in the fork server is what the "collect" warm-up does anyway; the
+            # other warm-ups exist to keep collection out of it, so they opt out.
+            reuse_session=config().reuse_test_session and config().forkserver_warmup == ForkServerWarmup.COLLECT,
         )
 
     pytest_runner = PytestRunner()
     pytest_runner.prepare_main_test_run()
-    return ForkRunner(max_workers=max_workers, test_runner=pytest_runner, debug=config().debug)
+    return ForkRunner(
+        max_workers=max_workers,
+        test_runner=pytest_runner,
+        debug=config().debug,
+        reuse_session=config().reuse_test_session,
+        max_restarts=config().max_forkserver_restarts,
+    )
