@@ -52,7 +52,10 @@ def serve(requests, runner_class=PytestRunner):
                 pid = os.fork()
                 if pid == 0:
                     os.environ["MUTANT_UNDER_TEST"] = mutant_name
-                    os._exit(run_mutant_tests(mutant_name, tests))
+                    exit_code, killing_test = run_mutant_tests(mutant_name, tests)
+                    with open("killing_tests.log", "a") as f:
+                        f.write(f"{killing_test}\n")
+                    os._exit(exit_code)
                 _, status = os.waitpid(pid, 0)
                 results.append(os.waitstatus_to_exitcode(status))
 
@@ -139,3 +142,38 @@ def test_fork_server_workers_pass_under_filterwarnings_error(project, reuse_sess
             runner.shutdown()
 
     assert run_in_fork_with_result(in_fork) == {"pkg.x_f__mutmut_2": 0, "pkg.x_f__mutmut_1": 1}
+
+
+def test_the_killing_test_is_reported(project):
+    assert serve(
+        [
+            ("pkg.x_f__mutmut_1", [A + "test_passes", A + "test_fails_when_mutant_active"]),
+            ("pkg.x_f__mutmut_2", [A + "test_passes"]),
+        ],
+        runner_class=RecordingRunner,
+    ) == [1, 0]
+    assert Path("mutants/killing_tests.log").read_text().splitlines() == [A + "test_fails_when_mutant_active", "None"]
+
+
+def test_fork_server_reports_the_killing_test(project):
+    def in_fork():
+        runner = ForkServerRunner(
+            max_workers=2, test_runner_class=PytestRunner, test_runner_args={}, reuse_session=True
+        )
+        runner.startup()
+        try:
+            runner.submit("pkg.x_f__mutmut_1", [A + "test_passes", A + "test_fails_when_mutant_active"], 60, 1.0)
+            runner.submit("pkg.x_f__mutmut_2", [A + "test_passes"], 60, 1.0)
+            runner.signal_work_complete()
+            results = {}
+            while runner.pending_count():
+                result = runner.wait_for_result()
+                results[result.mutant_name] = (result.exit_code, result.killing_test)
+            return results
+        finally:
+            runner.shutdown()
+
+    assert run_in_fork_with_result(in_fork) == {
+        "pkg.x_f__mutmut_1": (1, A + "test_fails_when_mutant_active"),
+        "pkg.x_f__mutmut_2": (0, None),
+    }

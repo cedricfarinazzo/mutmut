@@ -929,12 +929,37 @@ def _check_test_to_mutant_associations(
     exit(1)
 
 
-def order_tests_fastest_first(tests: Iterable[str]) -> list[str]:
-    """Order a mutant's tests by their recorded duration, fastest first.
+def order_tests_fastest_first(tests: Iterable[str], killing_tests: Iterable[str] = ()) -> list[str]:
+    """Order a mutant's tests for its test run, which stops at the first failure.
 
-    The test run stops at the first failure, so running the cheap tests first finds a
-    killed mutant sooner."""
-    return sorted(tests, key=lambda test_name: state().duration_by_test.get(test_name, 0.0))
+    ``killing_tests`` are the tests that recently killed other mutants of the same function,
+    most recent first: a test that caught one mutant of a function tends to catch its other
+    mutants too, so they go first. The other tests follow by their recorded duration, fastest
+    first, so a killed mutant is found as cheaply as possible."""
+    tests = set(tests)
+    killers_first = [test for test in killing_tests if test in tests]
+    rest = sorted(tests.difference(killers_first), key=lambda test_name: state().duration_by_test.get(test_name, 0.0))
+    return killers_first + rest
+
+
+class KillingTests:
+    """The tests that most recently killed mutants of each function, most recent first."""
+
+    # Enough to cover the tests that catch most of a function's mutants.
+    PER_FUNCTION = 5
+
+    def __init__(self) -> None:
+        self._by_function: dict[str, list[str]] = {}
+
+    def record(self, mutant_name: str, killing_test: str) -> None:
+        killers = self._by_function.setdefault(mangled_name_from_mutant_name(mutant_name), [])
+        if killing_test in killers:
+            killers.remove(killing_test)
+        killers.insert(0, killing_test)
+        del killers[self.PER_FUNCTION :]
+
+    def for_mutant(self, mutant_name: str) -> list[str]:
+        return self._by_function.get(mangled_name_from_mutant_name(mutant_name), [])
 
 
 def order_mutants_longest_first(mutants: list[_MutantEntry]) -> list[_MutantEntry]:
@@ -1088,12 +1113,16 @@ def _run(mutant_names: tuple[str, ...] | list[str], max_children: int | None) ->
         multiplier=cfg.timeout_multiplier, constant=cfg.timeout_constant, adaptive=cfg.adaptive_timeout
     )
 
+    killing_tests = KillingTests()
+
     def drain_one_result() -> None:
         nonlocal count_tried
         result = runner.wait_for_result()
         if config().debug:
             print("    worker exit code", result.exit_code)
         _register_mutant_result(result, mutation_data_by_mutant_name)
+        if result.killing_test is not None:
+            killing_tests.record(result.mutant_name, result.killing_test)
         if status_by_exit_code[result.exit_code] in ("killed", "survived"):
             mutation_data = mutation_data_by_mutant_name[result.mutant_name]
             timeouts.record(
@@ -1142,7 +1171,12 @@ def _run(mutant_names: tuple[str, ...] | list[str], max_children: int | None) ->
                 drain_one_result()
 
             mutation_data_by_mutant_name[mutant_name] = mutation_data
-            runner.submit(mutant_name, order_tests_fastest_first(tests), cpu_time_limit_s, estimated_time_of_tests)
+            runner.submit(
+                mutant_name,
+                order_tests_fastest_first(tests, killing_tests.for_mutant(mutant_name)),
+                cpu_time_limit_s,
+                estimated_time_of_tests,
+            )
 
         runner.signal_work_complete()
 

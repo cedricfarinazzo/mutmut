@@ -230,6 +230,60 @@ class MutantResult:
     mutant_name: str
     exit_code: int
     duration: float
+    # The test that failed first, when the runner knows it (only with a reused session).
+    killing_test: str | None = None
+
+
+class _KillingTests:
+    """Channel from the fork server's workers back to it: which test killed which mutant.
+
+    Workers only report through their exit code otherwise. Each worker writes one record
+    right before it exits, in a single write of at most PIPE_BUF bytes, which pipes keep
+    atomic; the fork server reads them after reaping the worker.
+    """
+
+    _FIELD_SEPARATOR = b"\x01"
+    _RECORD_SEPARATOR = b"\x00"
+
+    def __init__(self) -> None:
+        self.read_fd, self.write_fd = os.pipe()
+        os.set_blocking(self.read_fd, False)
+        self._buffer = b""
+        self._killing_test_by_mutant: dict[str, str] = {}
+
+    def report(self, mutant_name: str, killing_test: str) -> None:
+        """Worker side. Best effort: a report that does not fit is dropped."""
+        record = mutant_name.encode() + self._FIELD_SEPARATOR + killing_test.encode() + self._RECORD_SEPARATOR
+        if len(record) > select.PIPE_BUF:
+            return
+        try:
+            os.set_blocking(self.write_fd, False)
+            os.write(self.write_fd, record)
+        except OSError:
+            pass
+
+    def take(self, mutant_name: str) -> str | None:
+        """Fork server side: the killing test reported for this mutant, if any."""
+        while True:
+            try:
+                chunk = os.read(self.read_fd, 65536)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            self._buffer += chunk
+        *records, self._buffer = self._buffer.split(self._RECORD_SEPARATOR)
+        for record in records:
+            name, _, test = record.partition(self._FIELD_SEPARATOR)
+            self._killing_test_by_mutant[name.decode()] = test.decode()
+        return self._killing_test_by_mutant.pop(mutant_name, None)
+
+    def close(self) -> None:
+        for fd in (self.read_fd, self.write_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 class RunningWorker(NamedTuple):
@@ -352,6 +406,9 @@ class ForkServerRunner(MutantRunner):
 
     # Default maximum number of fork server restarts before giving up.
     DEFAULT_MAX_RESTARTS = 3
+
+    # Set up by the fork server's work loop.
+    _killing_tests: _KillingTests
 
     def __init__(
         self,
@@ -549,6 +606,7 @@ class ForkServerRunner(MutantRunner):
         # monkey-patch signals during import/collection.
         sigchld_pipe_r, sigchld_pipe_w = self._setup_sigchld_pipe()
         forkserver_logger.debug("SIGCHLD notification pipe set up")
+        self._killing_tests = _KillingTests()
 
         running: dict[int, ForkServerRunner.RunningChild] = {}
 
@@ -610,9 +668,11 @@ class ForkServerRunner(MutantRunner):
 
                 set_mutant_under_test(mutant_name)
                 try:
-                    exit_code = run_mutant_tests(mutant_name, tests)
+                    exit_code, killing_test = run_mutant_tests(mutant_name, tests)
                 except Exception:
-                    exit_code = -1
+                    exit_code, killing_test = -1, None
+                if killing_test is not None:
+                    self._killing_tests.report(mutant_name, killing_test)
 
                 worker_logger.debug(f"Finished {mutant_name}: exit={exit_code}")
                 os._exit(exit_code)
@@ -630,6 +690,7 @@ class ForkServerRunner(MutantRunner):
             os.close(sigchld_pipe_w)
         except OSError:
             pass
+        self._killing_tests.close()
         forkserver_logger.info("Fork server shutting down cleanly")
 
     def _reap_children(
@@ -665,7 +726,9 @@ class ForkServerRunner(MutantRunner):
             exit_code = os.waitstatus_to_exitcode(status)
             duration = time.time() - child.start_time
             forkserver_logger.debug(f"Completed {child.mutant_name}: exit={exit_code} ({duration:.3f}s)")
-            send_message(result_fd, (child.mutant_name, exit_code, duration))
+            send_message(
+                result_fd, (child.mutant_name, exit_code, duration, self._killing_tests.take(child.mutant_name))
+            )
 
     def submit(self, mutant_name: str, tests: list[str], cpu_time_limit: int, estimated_time: float) -> None:
         if not tests:
@@ -735,7 +798,7 @@ class ForkServerRunner(MutantRunner):
                 continue
 
             try:
-                mutant_name, exit_code, duration = recv_message(self.result_pipe_read)
+                mutant_name, exit_code, duration, killing_test = recv_message(self.result_pipe_read)
             except EOFError as err:
                 self._check_forkserver_alive()
                 raise ForkServerCrashError(exit_code=-1, lost_mutants=list(self._pending), crash_log=None) from err
@@ -743,7 +806,9 @@ class ForkServerRunner(MutantRunner):
             self._pending.discard(mutant_name)
             self._pending_work.pop(mutant_name, None)
 
-            return MutantResult(mutant_name=mutant_name, exit_code=exit_code, duration=duration)
+            return MutantResult(
+                mutant_name=mutant_name, exit_code=exit_code, duration=duration, killing_test=killing_test
+            )
 
     def pending_count(self) -> int:
         # Queued no-test results are submitted work nobody has collected yet.

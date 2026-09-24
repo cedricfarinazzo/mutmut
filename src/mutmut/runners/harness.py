@@ -18,8 +18,10 @@ if TYPE_CHECKING:
     from coverage import Coverage
 
 
-# Runs one mutant's tests: (mutant_name, tests) -> exit code. Called in the forked worker.
-RunMutantTests = Callable[[str, list[str]], int]
+# The exit code of a mutant's test run, and the test that failed first when it is known.
+MutantTestOutcome = tuple[int, str | None]
+# Runs one mutant's tests: (mutant_name, tests) -> outcome. Called in the forked worker.
+RunMutantTests = Callable[[str, list[str]], MutantTestOutcome]
 # The fork server's work loop, given the function its workers use to run a mutant's tests.
 MutantServeLoop = Callable[[RunMutantTests], None]
 
@@ -66,7 +68,7 @@ class TestRunner(ABC):
         """
         unused(reuse_session)
         self.warm_up()
-        loop(lambda mutant_name, tests: self.run_tests(mutant_name=mutant_name, tests=tests))
+        loop(lambda mutant_name, tests: (self.run_tests(mutant_name=mutant_name, tests=tests), None))
 
     def warm_up(self) -> None:
         """Pre-import expensive modules so forked children inherit them.
@@ -301,11 +303,11 @@ def _mutant_server_plugin(runner: PytestRunner, loop: MutantServeLoop, server_st
         def pytest_runtestloop(self, session: pytest.Session) -> bool:
             items_by_id = {item.nodeid: item for item in session.items}
 
-            def run_mutant_tests(mutant_name: str, tests: list[str]) -> int:
+            def run_mutant_tests(mutant_name: str, tests: list[str]) -> MutantTestOutcome:
                 items = [items_by_id.get(test) for test in tests]
                 if any(item is None for item in items):
                     # not in the collected session (deselected, or ids that changed): run pytest as usual
-                    return runner.run_tests(mutant_name=mutant_name, tests=tests)
+                    return runner.run_tests(mutant_name=mutant_name, tests=tests), None
                 return run_collected_items(session, items, pytest.exit.Exception)
 
             server_state.loop_ran = True
@@ -319,8 +321,11 @@ def _mutant_server_plugin(runner: PytestRunner, loop: MutantServeLoop, server_st
     return MutantServerPlugin()
 
 
-def run_collected_items(session: Any, items: list[Any], exit_exception: type[BaseException]) -> int:
-    """Run already-collected pytest items like a ``pytest -x`` run, and return its exit code.
+def run_collected_items(session: Any, items: list[Any], exit_exception: type[BaseException]) -> MutantTestOutcome:
+    """Run already-collected pytest items like a ``pytest -x`` run.
+
+    Returns the exit code pytest would have returned, and the node id of the test that
+    failed, if one did.
 
     Meant for a forked worker. Only failures of these items count: the session may already
     carry failures (and, with -x, ``session.shouldfail``, which pytest does not allow to be
@@ -332,14 +337,14 @@ def run_collected_items(session: Any, items: list[Any], exit_exception: type[Bas
             next_item = items[index + 1] if index + 1 < len(items) else None
             item.config.hook.pytest_runtest_protocol(item=item, nextitem=next_item)
             if session.testsfailed > failed_before:
-                break
+                return 1, item.nodeid
     except exit_exception as e:
-        return int(getattr(e, "returncode", None) or 2)
+        return int(getattr(e, "returncode", None) or 2), None
     except KeyboardInterrupt:
-        return 2
+        return 2, None
     except Exception:
-        return 3  # pytest's "internal error"
-    return 1 if session.testsfailed > failed_before else 0
+        return 3, None  # pytest's "internal error"
+    return 0, None
 
 
 class HammettRunner(TestRunner):

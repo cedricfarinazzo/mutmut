@@ -2,6 +2,7 @@
 
 import pytest
 
+from mutmut.__main__ import KillingTests
 from mutmut.__main__ import order_mutants_longest_first
 from mutmut.__main__ import order_tests_fastest_first
 from mutmut.state import reset_state
@@ -51,3 +52,34 @@ def test_order_mutants_longest_first_uses_estimated_worst_case_time():
         "pkg.mod.x_short__mutmut_1",
         "pkg.mod.x_untested__mutmut_1",
     ]
+
+
+def test_recent_killing_tests_run_first():
+    state().duration_by_test.update({"t_fast": 0.1, "t_mid": 1.0, "t_slow": 3.0})
+
+    assert order_tests_fastest_first(["t_fast", "t_mid", "t_slow"], ["t_slow", "t_other_function"]) == [
+        "t_slow",
+        "t_fast",
+        "t_mid",
+    ]
+
+
+def test_killing_tests_are_kept_per_function_most_recent_first():
+    killing = KillingTests()
+    killing.record("pkg.mod.x_f__mutmut_1", "t_a")
+    killing.record("pkg.mod.x_f__mutmut_2", "t_b")
+    killing.record("pkg.mod.x_f__mutmut_3", "t_a")
+    killing.record("pkg.mod.x_g__mutmut_1", "t_c")
+
+    assert killing.for_mutant("pkg.mod.x_f__mutmut_9") == ["t_a", "t_b"]
+    assert killing.for_mutant("pkg.mod.x_g__mutmut_9") == ["t_c"]
+    assert killing.for_mutant("pkg.mod.x_h__mutmut_1") == []
+
+
+def test_killing_tests_keep_only_the_most_recent_few():
+    killing = KillingTests()
+    for i in range(KillingTests.PER_FUNCTION + 3):
+        killing.record("pkg.mod.x_f__mutmut_1", f"t_{i}")
+
+    assert len(killing.for_mutant("pkg.mod.x_f__mutmut_1")) == KillingTests.PER_FUNCTION
+    assert killing.for_mutant("pkg.mod.x_f__mutmut_1")[0] == f"t_{KillingTests.PER_FUNCTION + 2}"

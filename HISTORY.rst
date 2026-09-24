@@ -18,6 +18,8 @@ Unreleased
 
 * Performance: mutmut's test runs no longer write pytest's cache (``-p no:cacheprovider``), unless your pytest args use it (``--lf``, ``--ff``, ``--sw``, ...)
 
+* Performance: the tests that killed a function's previous mutants now run first for its other mutants, since they tend to catch those too (with the reused pytest session)
+
 * Performance: under ``process_isolation = "forkserver"``, a mutant's tests run fastest first too, so killed mutants are found sooner
 
 * Performance: faster mutant generation, and every ``mutmut`` command starts faster: importing mutmut takes about half as long
