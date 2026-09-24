@@ -788,6 +788,9 @@ def badge(input_path: Path, output: Path, label: str) -> None:
     print(f"Saved mutation badge to {output}")
 
 
+_MutantEntry = tuple[SourceFileMutationData, str, int | None]
+
+
 def collect_source_file_mutation_data(
     *, mutant_names: tuple[str, ...] | list[str]
 ) -> tuple[
@@ -873,6 +876,15 @@ def order_tests_fastest_first(tests: Iterable[str]) -> list[str]:
     The test run stops at the first failure, so running the cheap tests first finds a
     killed mutant sooner."""
     return sorted(tests, key=lambda test_name: state().duration_by_test.get(test_name, 0.0))
+
+
+def order_mutants_longest_first(mutants: list[_MutantEntry]) -> list[_MutantEntry]:
+    """Order mutants by their estimated worst-case (surviving) test time, longest first.
+
+    With several workers, starting the long mutants first lets the short ones fill the gaps
+    around them. Running them shortest first leaves the longest ones for the end, where they
+    keep one worker busy while the others sit idle."""
+    return sorted(mutants, key=lambda x: estimated_worst_case_time(x[1]), reverse=True)
 
 
 def estimated_worst_case_time(mutant_name: str) -> float:
@@ -1020,8 +1032,7 @@ def _run(mutant_names: tuple[str, ...] | list[str], max_children: int | None) ->
         _register_mutant_result(result, mutation_data_by_mutant_name)
         count_tried += 1
 
-    # Run estimated fast mutants first, calculated as the estimated time for a surviving mutant.
-    mutants = sorted(mutants, key=lambda x: estimated_worst_case_time(x[1]))
+    mutants = order_mutants_longest_first(mutants)
     start = datetime.now()
     runner.startup()
     try:
