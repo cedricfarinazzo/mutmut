@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from mutmut.workers import timeout
+from mutmut.workers.timeout import MutantTimeouts
 
 
 @pytest.fixture(autouse=True)
@@ -171,3 +172,57 @@ class TestLazyStart:
         # Count timeout checker threads
         checker_threads = [t for t in threading.enumerate() if f"{pid}-mutmut-timeout-checker" in t.name]
         assert len(checker_threads) == 1
+
+
+class TestMutantTimeouts:
+    def _timeouts(self, adaptive=True):
+        return MutantTimeouts(multiplier=15.0, constant=1.0, adaptive=adaptive)
+
+    def _record_runs(self, timeouts, overhead, count=MutantTimeouts.MIN_SAMPLES):
+        for _ in range(count):
+            timeouts.record(estimated_time=0.002, duration=0.002 + overhead)
+
+    def test_default_formula(self):
+        assert self._timeouts(adaptive=False).wall_timeout(0.5) == pytest.approx((0.5 + 1.0) * 15)
+
+    def test_adaptive_uses_the_default_until_enough_runs_are_measured(self):
+        timeouts = self._timeouts()
+        self._record_runs(timeouts, overhead=0.01, count=MutantTimeouts.MIN_SAMPLES - 1)
+        assert timeouts.wall_timeout(0.001) == pytest.approx((0.001 + 1.0) * 15)
+
+    def test_adaptive_uses_the_measured_overhead(self):
+        timeouts = self._timeouts()
+        self._record_runs(timeouts, overhead=0.2)
+        assert timeouts.wall_timeout(0.1) == pytest.approx((0.1 + 0.2) * 15)
+
+    def test_adaptive_never_goes_below_the_constant(self):
+        timeouts = self._timeouts()
+        self._record_runs(timeouts, overhead=0.01)
+        assert timeouts.wall_timeout(0.001) == pytest.approx(1.0)
+
+    def test_adaptive_never_exceeds_the_default(self):
+        timeouts = self._timeouts()
+        self._record_runs(timeouts, overhead=5.0)
+        assert timeouts.wall_timeout(0.1) == pytest.approx((0.1 + 1.0) * 15)
+
+    def test_adaptive_uses_a_high_percentile_of_the_overhead(self):
+        timeouts = self._timeouts()
+        self._record_runs(timeouts, overhead=0.01, count=90)
+        self._record_runs(timeouts, overhead=0.3, count=10)
+        # the slowest 10% of the runs decide, not the typical one
+        assert timeouts.wall_timeout(0.0) == pytest.approx(0.3 * 15)
+
+    def test_disabled_ignores_measurements(self):
+        timeouts = self._timeouts(adaptive=False)
+        self._record_runs(timeouts, overhead=0.01)
+        assert timeouts.wall_timeout(0.001) == pytest.approx((0.001 + 1.0) * 15)
+
+
+def test_adaptive_timeout_only_changes_the_fingerprint_when_enabled(patch_config):
+    from mutmut.configuration import config
+
+    before = config().config_fingerprint()["timeout"]
+    patch_config("adaptive_timeout", False)
+    assert config().config_fingerprint()["timeout"] == before
+    patch_config("adaptive_timeout", True)
+    assert config().config_fingerprint()["timeout"] != before

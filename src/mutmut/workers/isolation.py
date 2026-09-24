@@ -918,9 +918,8 @@ class ForkRunner(MutantRunner):
             os._exit(result)
         else:
             # In the parent.
-            cfg = config()
-            wall_time_limit_s = (estimated_time + cfg.timeout_constant) * cfg.timeout_multiplier
-            register_timeout(pid=pid, timeout_s=wall_time_limit_s)
+            # Same wall-clock bound as the fork server: half the CPU-time limit.
+            register_timeout(pid=pid, timeout_s=cpu_time_limit / 2)
             self._running[pid] = RunningWorker(mutant_name, datetime.now(), estimated_time)
 
     def has_capacity(self) -> bool:

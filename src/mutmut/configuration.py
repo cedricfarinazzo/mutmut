@@ -216,6 +216,7 @@ def _load_config() -> Config:
         forkserver_warmup=forkserver_warmup,
         max_forkserver_restarts=s("max_forkserver_restarts", 3),
         reuse_test_session=s("reuse_test_session", True),
+        adaptive_timeout=s("adaptive_timeout", False),
         preload_modules_file=s("preload_modules_file", None),
         log_to_file=s("log_to_file", False),
         log_file_path=s("log_file_path", "mutants/mutmut-debug.log"),
@@ -255,6 +256,7 @@ class Config:
     log_to_file: bool
     log_file_path: str
     reuse_test_session: bool = True
+    adaptive_timeout: bool = False
 
     def config_fingerprint(self) -> dict[str, str]:
         """Hash the config fields that can change cached mutant *results*, grouped so the
@@ -274,7 +276,11 @@ class Config:
             # which tests cover which function: a change reshapes the stats mapping
             "test_selection": _hash(tuple(self.pytest_add_cli_args_test_selection)),
             # only reclassifies timeouts
-            "timeout": _hash((self.timeout_multiplier, self.timeout_constant)),
+            "timeout": _hash(
+                (self.timeout_multiplier, self.timeout_constant, "adaptive")
+                if self.adaptive_timeout
+                else (self.timeout_multiplier, self.timeout_constant)
+            ),
             # only changes the type-check pre-filter
             "type_check": _hash(tuple(self.type_check_command)),
         }

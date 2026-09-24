@@ -12,6 +12,8 @@ Unreleased
 
 * Performance: the longest mutants are now run first, so the workers are kept busy until the end of the run
 
+* Performance: new ``adaptive_timeout`` option. Mutants that never finish (infinite loops) used to wait ``(test time + timeout_constant) * timeout_multiplier``, about 15 seconds even for millisecond tests. With it, the timeout is based on the overhead measured on the mutants that finished normally. On toolz this made the whole run 3x faster, with the same results
+
 * Performance: incremental runs skip listing the tests when nothing that decides which tests pytest collects has changed
 
 * Performance: mutmut's test runs no longer write pytest's cache (``-p no:cacheprovider``), unless your pytest args use it (``--lf``, ``--ff``, ``--sw``, ...)

@@ -79,6 +79,7 @@ from mutmut.utils.file_utils import walk_source_files
 from mutmut.workers.isolation import MutantResult
 from mutmut.workers.isolation import MutantRunner
 from mutmut.workers.isolation import get_mutant_runner
+from mutmut.workers.timeout import MutantTimeouts
 
 # Document: surviving mutants are retested when you ask mutmut to retest them, interactively in the UI or via command line
 
@@ -1082,12 +1083,23 @@ def _run(mutant_names: tuple[str, ...] | list[str], max_children: int | None) ->
     mutation_data_by_mutant_name: dict[str, SourceFileMutationData] = {}
     count_tried = 0
 
+    cfg = config()
+    timeouts = MutantTimeouts(
+        multiplier=cfg.timeout_multiplier, constant=cfg.timeout_constant, adaptive=cfg.adaptive_timeout
+    )
+
     def drain_one_result() -> None:
         nonlocal count_tried
         result = runner.wait_for_result()
         if config().debug:
             print("    worker exit code", result.exit_code)
         _register_mutant_result(result, mutation_data_by_mutant_name)
+        if status_by_exit_code[result.exit_code] in ("killed", "survived"):
+            mutation_data = mutation_data_by_mutant_name[result.mutant_name]
+            timeouts.record(
+                estimated_time=mutation_data.estimated_time_of_tests_by_mutant.get(result.mutant_name, 0.0),
+                duration=result.duration,
+            )
         count_tried += 1
 
     mutants = order_mutants_longest_first(mutants)
@@ -1120,9 +1132,10 @@ def _run(mutant_names: tuple[str, ...] | list[str], max_children: int | None) ->
                 mutation_data.save()
                 continue
 
-            cfg = config()
-            # signal SIGXCPU after this many CPU seconds; the runner adds one more before SIGKILL.
-            cpu_time_limit_s = ceil((estimated_time_of_tests + cfg.timeout_constant) * cfg.timeout_multiplier * 2)
+            # The runners stop a worker after cpu_time_limit_s / 2 wall-clock seconds, and signal
+            # SIGXCPU after cpu_time_limit_s CPU seconds (+1 more before SIGKILL): multi-threaded
+            # code can burn several CPU seconds per wall-clock second.
+            cpu_time_limit_s = ceil(timeouts.wall_timeout(estimated_time_of_tests) * 2)
 
             # Block for a free worker slot before submitting more work.
             while not runner.has_capacity():

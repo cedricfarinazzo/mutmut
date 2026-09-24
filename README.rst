@@ -620,6 +620,13 @@ If you use them, expect that a new version could change or break this feature.
     timeout_constant = 1.0
     timeout_multiplier = 15.0
 
+    # Measure how long a mutant's test run really takes on top of the tests themselves
+    # (fixture setup, imports, ...) and base the timeout on that, instead of the generous
+    # timeout_constant: (duration_of_original_tests + measured overhead) * timeout_multiplier,
+    # never below timeout_constant and never above the default. For fast tests this makes
+    # mutants that never finish (infinite loops) time out in about a second instead of 15.
+    adaptive_timeout = false
+
 
 Example mutations
 -----------------
