@@ -520,8 +520,12 @@ class ForkServerRunner(MutantRunner):
         # Warm-up (or collection) runs with stdout/stderr suppressed, so its output does not
         # corrupt the interactive terminal. With a reused session, the whole loop runs inside
         # pytest, whose terminal reporter keeps writing to the stream it saw at startup.
+        # The workers inherit these streams and keep them: replacing them in a worker would
+        # drop the last reference to this file mid-test, and the resulting ResourceWarning
+        # fails the test in projects that run with ``filterwarnings = error``.
         old_stdout, old_stderr = sys.stdout, sys.stderr
-        sys.stdout = sys.stderr = open(os.devnull, "w")
+        devnull = open(os.devnull, "w")
+        sys.stdout = sys.stderr = devnull
         try:
             test_runner.serve_mutants(
                 lambda run_mutant_tests: self._serve(work_fd, result_fd, forkserver_logger, run_mutant_tests),
@@ -529,6 +533,7 @@ class ForkServerRunner(MutantRunner):
             )
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
+            devnull.close()
 
     def _serve(
         self,
@@ -599,8 +604,6 @@ class ForkServerRunner(MutantRunner):
                 worker_logger = get_logger(f"mutmut.forkserver.worker.{os.getpid()}")
                 worker_logger.debug(f"Starting {mutant_name} ({len(tests)} tests)")
                 setproctitle(f"mutmut: {mutant_name}")
-
-                sys.stdout = sys.stderr = open(os.devnull, "w")
 
                 limit = cpu_time_limit + int(process_time())
                 resource.setrlimit(resource.RLIMIT_CPU, (limit, limit + 1))

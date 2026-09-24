@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from mutmut.runners.harness import PytestRunner
+from mutmut.workers.isolation import ForkServerRunner
 from mutmut.workers.isolation import run_in_fork_with_result
 
 TEST_FILE = """
@@ -112,3 +113,29 @@ def test_collection_errors_elsewhere_do_not_stop_a_worker_after_its_first_test(p
         runner_class=RecordingRunner,
     ) == [1]
     assert not Path("mutants/fallback.log").exists()
+
+
+@pytest.mark.parametrize("reuse_session", [True, False])
+def test_fork_server_workers_pass_under_filterwarnings_error(project, reuse_session):
+    # Projects that turn warnings into errors must not see warnings caused by mutmut itself,
+    # like a ResourceWarning for a replaced sys.stdout, in the middle of a test.
+    (project.parent / "pytest.ini").write_text("[pytest]\nfilterwarnings =\n    error\n")
+
+    def in_fork():
+        runner = ForkServerRunner(
+            max_workers=1, test_runner_class=PytestRunner, test_runner_args={}, reuse_session=reuse_session
+        )
+        runner.startup()
+        try:
+            runner.submit("pkg.x_f__mutmut_2", [A + "test_passes"], 60, 1.0)
+            runner.submit("pkg.x_f__mutmut_1", [A + "test_passes", A + "test_fails_when_mutant_active"], 60, 1.0)
+            runner.signal_work_complete()
+            results = {}
+            while runner.pending_count():
+                result = runner.wait_for_result()
+                results[result.mutant_name] = result.exit_code
+            return results
+        finally:
+            runner.shutdown()
+
+    assert run_in_fork_with_result(in_fork) == {"pkg.x_f__mutmut_2": 0, "pkg.x_f__mutmut_1": 1}
