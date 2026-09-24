@@ -11,6 +11,8 @@ from unittest.mock import patch
 import pytest
 from typing_extensions import Self
 
+import mutmut.mutation.trampoline as trampoline_module
+from mutmut.core import MutmutProgrammaticFailException
 from mutmut.mutation.trampoline import get_mutant_under_test
 from mutmut.mutation.trampoline import set_mutant_under_test
 from mutmut.mutation.trampoline import wrap_in_trampoline
@@ -271,6 +273,31 @@ class TestSimpleFunc:
         set_mutant_under_test(None)
         monkeypatch.setenv("MUTANT_UNDER_TEST", "from-env")
         assert get_mutant_under_test() == "from-env"
+
+    def test_env_changes_between_calls_are_picked_up(self, monkeypatch):
+        # the parsed environment value is cached; a new value must replace it
+        monkeypatch.setenv("MUTANT_UNDER_TEST", "test_trampoline.simple_func__mutmut_1")
+        assert simple_func(2, 3) == -1
+        monkeypatch.setenv("MUTANT_UNDER_TEST", "")
+        assert simple_func(2, 3) == 5
+        monkeypatch.setenv("MUTANT_UNDER_TEST", "test_trampoline.simple_func__mutmut_1")
+        assert simple_func(2, 3) == -1
+
+    def test_env_lookup_without_the_posix_fast_path(self, monkeypatch):
+        monkeypatch.setattr(trampoline_module, "_environ_is_bytes_backed", False)
+        monkeypatch.setenv("MUTANT_UNDER_TEST", "test_trampoline.simple_func__mutmut_1")
+        assert simple_func(2, 3) == -1
+        assert get_mutant_under_test() == "test_trampoline.simple_func__mutmut_1"
+
+    def test_fail_mode_raises(self, monkeypatch):
+        monkeypatch.setenv("MUTANT_UNDER_TEST", "fail")
+        with pytest.raises(MutmutProgrammaticFailException):
+            simple_func(2, 3)
+
+    def test_plain_function_keeps_its_metadata(self):
+        assert simple_func.__name__ == "simple_func"
+        assert simple_func.__wrapped__ is not None
+        assert list(inspect.signature(simple_func).parameters) == ["a", "b"]
 
 
 class TestAsyncAndGeneratorFunc:
