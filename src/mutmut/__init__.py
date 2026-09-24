@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import importlib.metadata
 import warnings
 
 from mutmut.configuration import config
 from mutmut.configuration import reset_config
 from mutmut.state import reset_state
 from mutmut.state import state
-
-__version__ = importlib.metadata.version("mutmut")
-
 
 _DEPRECATED_STATE_ATTRS = frozenset(
     {
@@ -25,6 +21,15 @@ _DEPRECATED_STATE_ATTRS = frozenset(
 
 def __getattr__(name: str) -> object:
     match name:
+        case "__version__":
+            # Computed on first use: importing importlib.metadata takes ~30ms, and every process
+            # that imports mutated code imports mutmut (via the trampoline), including the
+            # subprocesses a test suite may start.
+            import importlib.metadata
+
+            version = importlib.metadata.version("mutmut")
+            globals()["__version__"] = version
+            return version
         case "config":
             warnings.warn(
                 "mutmut.config is deprecated as of 3.4.1, use mutmut.configuration.config() instead",
