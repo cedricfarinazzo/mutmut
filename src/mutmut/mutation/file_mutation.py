@@ -15,7 +15,6 @@ from typing import Union
 from typing import cast
 
 import libcst as cst
-import libcst.matchers as m
 from libcst.metadata import MetadataWrapper
 from libcst.metadata import PositionProvider
 
@@ -529,7 +528,8 @@ def function_trampoline_arrangement(
     # trampoline with same signature, that forwards the calls to the activated mutant/original method
     # (put first, s.t. it stays next to @overload definitions of this function. mypy needs this)
     decorator_args = [cst.Arg(cst.Name(mutants_dict_name))]
-    if len(function.decorators) == 1 and m.matches(function.decorators[0].decorator, m.Name("classmethod")):
+    decorator = function.decorators[0].decorator if len(function.decorators) == 1 else None
+    if isinstance(decorator, cst.Name) and decorator.value == "classmethod":
         decorator_args.append(cst.Arg(cst.Name("True"), keyword=cst.Name("is_classmethod")))
     trampoline = function.with_changes(
         decorators=[
@@ -565,7 +565,7 @@ def get_statements_until_func_or_class(statements: Sequence[MODULE_STATEMENT]) -
     result: list[MODULE_STATEMENT] = []
 
     for stmt in statements:
-        if m.matches(stmt, m.FunctionDef() | m.ClassDef()):
+        if isinstance(stmt, (cst.FunctionDef, cst.ClassDef)):
             return result
         result.append(stmt)
 

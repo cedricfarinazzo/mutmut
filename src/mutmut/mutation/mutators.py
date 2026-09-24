@@ -5,10 +5,8 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Sequence
 from typing import Any
-from typing import cast
 
 import libcst as cst
-import libcst.matchers as m
 
 OPERATORS_TYPE = Sequence[
     tuple[
@@ -19,6 +17,14 @@ OPERATORS_TYPE = Sequence[
 
 # pattern to match (nearly) all chars in a string that are not part of an escape sequence
 NON_ESCAPE_SEQUENCE = re.compile(r"((?<!\\)[^\\]+)")
+
+
+def _is_name(node: cst.CSTNode, value: str) -> bool:
+    """Whether `node` is the name `value`.
+
+    Plain type checks rather than ``libcst.matchers``: the matchers module alone takes
+    ~0.2s to import, and matching is slower than an isinstance check."""
+    return isinstance(node, cst.Name) and node.value == value
 
 
 def operator_number(node: cst.BaseNumber) -> Iterable[cst.BaseNumber]:
@@ -59,7 +65,7 @@ def operator_string(node: cst.BaseString) -> Iterable[cst.BaseString]:
 
 
 def operator_lambda(node: cst.Lambda) -> Iterable[cst.Lambda]:
-    if m.matches(node, m.Lambda(body=m.Name("None"))):
+    if _is_name(node.body, "None"):
         yield node.with_changes(body=cst.Integer("0"))
     else:
         yield node.with_changes(body=cst.Name("None"))
@@ -67,7 +73,7 @@ def operator_lambda(node: cst.Lambda) -> Iterable[cst.Lambda]:
 
 def operator_dict_arguments(node: cst.Call) -> Iterable[cst.Call]:
     """mutate dict(a=b, c=d) to dict(aXX=b, c=d) and dict(a=b, cXX=d)"""
-    if not m.matches(node.func, m.Name(value="dict")):
+    if not _is_name(node.func, "dict"):
         return
 
     for i, arg in enumerate(node.args):
@@ -87,7 +93,7 @@ def operator_arg_removal(node: cst.Call) -> Iterable[cst.Call]:
     """try to drop each arg in a function call, e.g. foo(a, b) -> foo(b), foo(a)"""
     for i, arg in enumerate(node.args):
         # replace with None
-        if arg.star == "" and not m.matches(arg.value, m.Name("None")):
+        if arg.star == "" and not _is_name(arg.value, "None"):
             mutated_arg = arg.with_changes(value=cst.Name("None"))
             yield node.with_changes(args=[*node.args[:i], mutated_arg, *node.args[i + 1 :]])
 
@@ -121,7 +127,7 @@ def operator_symmetric_string_methods_swap(node: cst.Call) -> Iterable[cst.Call]
     """try to swap string method to opposite e.g. a.lower() -> a.upper()"""
 
     for old_call, new_call in supported_symmetric_str_methods_swap:
-        if m.matches(node.func, m.Attribute(value=m.DoNotCare(), attr=m.Name(value=old_call))):
+        if isinstance(node.func, cst.Attribute) and _is_name(node.func.attr, old_call):
             func_name = cst.ensure_type(node.func, cst.Attribute).attr
             yield node.with_deep_changes(func_name, value=new_call)
 
@@ -129,7 +135,7 @@ def operator_symmetric_string_methods_swap(node: cst.Call) -> Iterable[cst.Call]
 def operator_unsymmetrical_string_methods_swap(node: cst.Call) -> Iterable[cst.Call]:
     """Try to handle specific mutations of string, which useful only in specific args combination."""
     for old_call, new_call in supported_unsymmetrical_str_methods_swap:
-        if m.matches(node.func, m.Attribute(attr=m.Name(value=old_call))):
+        if isinstance(node.func, cst.Attribute) and _is_name(node.func.attr, old_call):
             if old_call in {"split", "rsplit"}:
                 # The logic of this "if" operator described here:
                 # https://github.com/boxed/mutmut/pull/394#issuecomment-2977890188
@@ -207,16 +213,18 @@ _operator_mapping: dict[type[cst.CSTNode], type[cst.CSTNode]] = {
 }
 
 
+_NODES_WITH_OPERATOR = (
+    cst.BinaryOperation,
+    cst.UnaryOperation,
+    cst.BooleanOperation,
+    cst.ComparisonTarget,
+    cst.AugAssign,
+)
+
+
 def operator_swap_op(node: cst.CSTNode) -> Iterable[cst.CSTNode]:
-    if m.matches(
-        node,
-        m.BinaryOperation() | m.UnaryOperation() | m.BooleanOperation() | m.ComparisonTarget() | m.AugAssign(),
-    ):
-        typed_node = cast(
-            cst.BinaryOperation | cst.UnaryOperation | cst.BooleanOperation | cst.ComparisonTarget | cst.AugAssign,
-            node,
-        )
-        operator = typed_node.operator
+    if isinstance(node, _NODES_WITH_OPERATOR):
+        operator = node.operator
         for new_operator in _simple_mutation_mapping(operator, _operator_mapping):
             yield node.with_changes(operator=new_operator)
 
@@ -233,7 +241,7 @@ def operator_assignment(
     if not node.value:
         # do not mutate `a: sometype` to an assignment `a: sometype = ""`
         return
-    if m.matches(node.value, m.Name("None")):
+    if _is_name(node.value, "None"):
         mutated_value = cst.SimpleString('""')
     else:
         mutated_value = cst.Name("None")  # type: ignore[assignment]
