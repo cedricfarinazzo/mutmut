@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from mutmut.runners.harness import ListAllTestsResult
+from mutmut.runners.harness import PytestRunner
 from mutmut.state import state
 
 STATS_FILE = Path("mutants/mutmut-stats.json")
@@ -69,3 +70,23 @@ class TestClearOutObsoleteTestNames:
         assert dict(state().tests_by_mangled_function_name) == {"pkg.foo.x_add": {"tests/test_foo.py::test_add"}}
         assert capsys.readouterr().out == ""
         assert not STATS_FILE.exists()
+
+
+class TestCacheProviderArgs:
+    def _runner(self, add_cli_args=(), selection=()):
+        runner = PytestRunner.__new__(PytestRunner)
+        runner._pytest_add_cli_args = list(add_cli_args)
+        runner._pytest_add_cli_args_test_selection = list(selection)
+        return runner
+
+    def test_cache_plugin_is_disabled_for_regular_runs(self):
+        args = self._runner()._pytest_args_regular_run(["tests/test_foo.py::test_add"])
+        assert args[args.index("no:cacheprovider") - 1] == "-p"
+
+    @pytest.mark.parametrize(
+        "user_args",
+        [["--lf"], ["--stepwise"], ["-p", "cacheprovider"]],
+    )
+    def test_user_args_that_need_the_cache_keep_it(self, user_args):
+        assert "no:cacheprovider" not in self._runner(add_cli_args=user_args)._pytest_args_regular_run([])
+        assert "no:cacheprovider" not in self._runner(selection=user_args)._pytest_args_regular_run([])

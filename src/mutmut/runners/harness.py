@@ -88,6 +88,25 @@ class ListAllTestsResult:
         return self.ids - collected_test_names()
 
 
+# pytest options that need the cacheprovider plugin; if the user passes one, keep the plugin.
+_CACHE_DEPENDENT_ARGS = frozenset(
+    {
+        "--lf",
+        "--last-failed",
+        "--ff",
+        "--failed-first",
+        "--nf",
+        "--new-first",
+        "--sw",
+        "--stepwise",
+        "--sw-skip",
+        "--stepwise-skip",
+        "--cache-show",
+        "--cache-clear",
+    }
+)
+
+
 class PytestRunner(TestRunner):
     def __init__(self) -> None:
         self._pytest_add_cli_args: list[str] = config().pytest_add_cli_args
@@ -136,8 +155,19 @@ class PytestRunner(TestRunner):
             raise BadTestExecutionCommandsException(params)
         return exit_code
 
+    def _cacheprovider_args(self) -> list[str]:
+        """Disable pytest's cache plugin unless the user's own args rely on it.
+
+        Every run would otherwise rewrite ``.pytest_cache/v/cache/{lastfailed,nodeids}``,
+        once per mutant, from all the concurrent workers at the same time.
+        """
+        user_args = self._pytest_add_cli_args + self._pytest_add_cli_args_test_selection
+        if any(arg in _CACHE_DEPENDENT_ARGS or "cacheprovider" in arg for arg in user_args):
+            return []
+        return ["-p", "no:cacheprovider"]
+
     def _pytest_args_regular_run(self, tests: Iterable[str]) -> list[str]:
-        pytest_args = ["-x", "-q", "-p", "no:randomly", "-p", "no:random-order"]
+        pytest_args = ["-x", "-q", "-p", "no:randomly", "-p", "no:random-order"] + self._cacheprovider_args()
         if tests:
             pytest_args += list(tests)
         else:
