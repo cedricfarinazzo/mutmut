@@ -273,7 +273,7 @@ class MutantRunner(ABC):
 
         Args:
             mutant_name: The mutant identifier (e.g. 'module.func__mutmut_1').
-            tests: Test node ids to run.
+            tests: Test node ids to run, in the order they should run.
             cpu_time_limit: CPU-time limit in seconds for the test run.
             estimated_time: Estimated test duration, used for timeout tracking.
         """
@@ -856,9 +856,6 @@ class ForkRunner(MutantRunner):
             set_mutant_under_test(mutant_name)
             setproctitle(f"mutmut: {mutant_name}")
 
-            # Run fast tests first.
-            tests_sorted = sorted(tests, key=lambda test_name: state().duration_by_test[test_name])
-
             # Signal SIGXCPU after the CPU limit, and SIGKILL one second later if
             # it is still running.
             limit = cpu_time_limit + int(process_time())
@@ -867,7 +864,7 @@ class ForkRunner(MutantRunner):
             if not self.debug:
                 sys.stdout = sys.stderr = open(os.devnull, "w")
 
-            result = self.test_runner.run_tests(mutant_name=mutant_name, tests=tests_sorted)
+            result = self.test_runner.run_tests(mutant_name=mutant_name, tests=tests)
             os._exit(result)
         else:
             # In the parent.

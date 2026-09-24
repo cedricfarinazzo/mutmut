@@ -867,6 +867,14 @@ def _check_test_to_mutant_associations(
     exit(1)
 
 
+def order_tests_fastest_first(tests: Iterable[str]) -> list[str]:
+    """Order a mutant's tests by their recorded duration, fastest first.
+
+    The test run stops at the first failure, so running the cheap tests first finds a
+    killed mutant sooner."""
+    return sorted(tests, key=lambda test_name: state().duration_by_test.get(test_name, 0.0))
+
+
 def estimated_worst_case_time(mutant_name: str) -> float:
     tests = state().tests_by_mangled_function_name.get(mangled_name_from_mutant_name(mutant_name), set())
     return sum(state().duration_by_test[t] for t in tests)
@@ -1052,7 +1060,7 @@ def _run(mutant_names: tuple[str, ...] | list[str], max_children: int | None) ->
                 drain_one_result()
 
             mutation_data_by_mutant_name[mutant_name] = mutation_data
-            runner.submit(mutant_name, list(tests), cpu_time_limit_s, estimated_time_of_tests)
+            runner.submit(mutant_name, order_tests_fastest_first(tests), cpu_time_limit_s, estimated_time_of_tests)
 
         runner.signal_work_complete()
 
