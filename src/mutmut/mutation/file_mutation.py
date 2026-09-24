@@ -131,7 +131,10 @@ def create_mutations(
         statements starting on them are ignored, like a `# pragma: no mutate block`.
     :return: A tuple of (module, mutations, ignored_classes, ignored_functions)."""
     module = cst.parse_module(code)
-    metadata_wrapper = MetadataWrapper(module)
+    # The wrapper deep-copies the tree unless told not to. The copy only protects against a
+    # node object appearing twice in the tree, which a freshly parsed module never has, and
+    # nothing else holds on to `module`.
+    metadata_wrapper = MetadataWrapper(module, unsafe_skip_copy=True)
 
     ignored_code = get_ignored_lines(filename, code, metadata_wrapper, coverage_excluded_lines)
 
