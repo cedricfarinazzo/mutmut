@@ -26,6 +26,7 @@ import struct
 import sys
 import time
 import traceback
+import warnings
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
@@ -153,6 +154,22 @@ def run_in_fork(fn: Callable[..., int], *args: Any, **kwargs: Any) -> int:
     # Parent waits for child
     _, status = os.waitpid(pid, 0)
     return os.waitstatus_to_exitcode(status)
+
+
+def _fork_worker() -> int:
+    """``os.fork()`` for the fork server's workers, without the multi-threaded fork warning.
+
+    The fork server runs a timeout thread (``register_timeout``), so from the second worker
+    on Python warns that forking a multi-threaded process may deadlock the child. That
+    thread only sleeps on its own lock, which the workers never take. Inside a reused pytest
+    session the project's warning filters apply, and ``filterwarnings = error`` turned the
+    warning into an exception that killed the fork server (seen on Python 3.15).
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message=r".*use of fork\(\) may lead to deadlocks", category=DeprecationWarning
+        )
+        return os.fork()
 
 
 # Pipe messaging. Length-prefixed frames read with raw os.read() rather than a
@@ -656,7 +673,7 @@ class ForkServerRunner(MutantRunner):
                 f"cpu_limit={cpu_time_limit}s, wall_timeout={wall_timeout}s)"
             )
 
-            child_pid = os.fork()
+            child_pid = _fork_worker()
             if child_pid == 0:
                 # Grandchild: run this mutant's tests under a CPU limit.
                 worker_logger = get_logger(f"mutmut.forkserver.worker.{os.getpid()}")
